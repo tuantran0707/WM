@@ -15,10 +15,10 @@ flowchart LR
     end
 
     subgraph SENS["🌊 Sensing"]
-        US_TX["Ultrasonic TX"]
-        US_RX["Ultrasonic RX"]
+        US_TX["Ultrasonic TX<br/>1 MHz Transducer"]
+        US_RX["Ultrasonic RX<br/>1 MHz Transducer"]
         NTC["NTC Temperature"]
-        TDC["TDC Chip<br/>(TDC7200)"]
+        TDC["TDC-GP22<br/>(ACAM/ScioSense)"]
         US_TX --> TDC
         US_RX --> TDC
     end
@@ -29,7 +29,7 @@ flowchart LR
 
     subgraph HMI["👤 HMI"]
         LCD["LCD Display"]
-        BTN["Push Button"]
+        BTN["Capacitive Spring<br/>Touch Button"]
         IR["IR TX/RX<br/>(AT Command)"]
     end
 
@@ -44,7 +44,7 @@ flowchart LR
     NTC -- ADC --> CORE
     BAT -- ADC --> CORE
     CORE -- SPI --> LCD
-    BTN -- GPIO/EXTI --> CORE
+    BTN -- TSC/EXTI --> CORE
     IR -- LPUART --> CORE
     CORE -- RF --> ANT
     ANT --> GW --> SRV
@@ -68,13 +68,13 @@ flowchart TB
     end
 
     subgraph HAL["HAL / Drivers"]
-        H_TDC["TDC SPI"]
+        H_TDC["TDC-GP22 SPI Driver"]
         H_LCD["LCD SPI"]
         H_IR["LPUART (IR)"]
         H_RF["Sub-GHz Radio"]
         H_RTC["RTC"]
         H_ADC["ADC"]
-        H_GPIO["GPIO/EXTI"]
+        H_TSC["TSC (Touch)<br/>Capacitive Sensing"]
         H_NVM["Flash NVM"]
     end
 
@@ -82,7 +82,7 @@ flowchart TB
     H_ADC --> FLOW
     H_ADC --> ALARM
     H_LCD --> DISP
-    H_GPIO --> DISP
+    H_TSC --> DISP
     H_IR --> IRCMD
     H_RF --> LWAN
     H_RTC --> PWR
@@ -110,62 +110,120 @@ flowchart TB
 
 ## 3. Main Firmware Flowchart
 
+The firmware is **event-driven** around a single low-power sleep state (STOP2).
+All work is triggered by one of four wakeup sources; after each task the MCU
+returns to sleep. This minimises active time and maximises battery life.
+
+**Three phases of execution:**
+
+| Phase | Runs | Purpose |
+|---|---|---|
+| **A. Boot** | Once after reset | Init hardware, load config, prepare peripherals |
+| **B. Network Join** | Once after boot (and on rejoin) | OTAA Join to LoRaWAN AS923-2 |
+| **C. Run Loop** | Forever | Sleep → wake → handle event → sleep |
+
 ```mermaid
 flowchart TD
-    START([Power On / Reset]) --> INIT["HW Init<br/>Clock • GPIO • SPI • LPUART • ADC • RTC"]
-    INIT --> CFG["Load Config from Flash<br/>(DevEUI, AppKey, Interval, Cal)"]
-    CFG --> VALID{Config<br/>valid?}
-    VALID -- No --> DEF["Load Default Config"]
-    DEF --> JOIN
-    VALID -- Yes --> JOIN
+    START(["🔌 Power On / Reset"]) --> A1
 
-    JOIN["OTAA Join Request<br/>AS923-2"] --> JOK{Join<br/>Accept?}
-    JOK -- No --> BACK["Exponential Backoff"]
-    BACK --> JOIN
-    JOK -- Yes --> IDLE
+    subgraph PHASE_A["Phase A — Boot"]
+        A1["1. Init Hardware<br/>Clock • GPIO • SPI • LPUART<br/>ADC • RTC • TSC"]
+        A1 --> A2["2. Load Config from Flash<br/>(DevEUI, AppKey, Interval, Cal)"]
+        A2 --> A3{Config valid?}
+        A3 -- No --> A4["Restore defaults<br/>+ save to Flash"]
+        A4 --> A5
+        A3 -- Yes --> A5["3. Init TDC-GP22 + LCD<br/>Show splash screen"]
+    end
 
-    IDLE(["💤 STOP2 Sleep<br/>~2µA"]) --> WK{Wakeup Source?}
+    A5 --> B1
 
-    WK -- "RTC 15s" --> MEAS[/"Ultrasonic Measurement<br/>(Section 4)"/]
-    WK -- "RTC 24h" --> RPT[/"LoRaWAN Report<br/>(Section 5)"/]
-    WK -- "Button" --> SCR[/"Screen Switch<br/>(Section 6)"/]
-    WK -- "IR RX" --> IRC[/"AT Command Handler<br/>(Section 7)"/]
+    subgraph PHASE_B["Phase B — Network Join"]
+        B1["Init LoRaWAN stack<br/>AS923-2 band"]
+        B1 --> B2["Send OTAA Join Request"]
+        B2 --> B3{Join Accept?}
+        B3 -- No --> B4["Backoff (exponential)"]
+        B4 --> B2
+        B3 -- Yes --> B5["✅ Save session keys"]
+    end
 
-    MEAS --> IDLE
-    RPT --> IDLE
-    SCR --> IDLE
-    IRC --> IDLE
+    B5 --> IDLE
+
+    subgraph PHASE_C["Phase C — Run Loop"]
+        IDLE(["💤 STOP2 Sleep ~2µA"]) --> WK{Wakeup Source}
+        WK -- "RTC 15 s" --> EV1["Ultrasonic Measure<br/>→ Section 4"]
+        WK -- "RTC 24 h" --> EV2["LoRaWAN Report<br/>→ Section 5"]
+        WK -- "TSC Touch" --> EV3["Screen Switch<br/>→ Section 6"]
+        WK -- "IR RX" --> EV4["AT Command<br/>→ Section 7"]
+        EV1 --> IDLE
+        EV2 --> IDLE
+        EV3 --> IDLE
+        EV4 --> IDLE
+    end
 
     style START fill:#4CAF50,color:#fff
     style IDLE fill:#2196F3,color:#fff
+    style PHASE_A fill:#E3F2FD,stroke:#1565C0
+    style PHASE_B fill:#F3E5F5,stroke:#7B1FA2
+    style PHASE_C fill:#FFF8E1,stroke:#F57F17
 ```
 
 ---
 
 ## 4. Ultrasonic Measurement (Time-of-Flight)
 
+### 4.1 Principle
+
+Two **1 MHz piezoelectric transducers** are bonded to the DN15 copper pipe, facing each
+other at angle. The **TDC-GP22** measures, with picosecond resolution, the time each
+ultrasonic burst takes to travel between them:
+
+- **t₁** — time travelling **with** the water flow (downstream direction)
+- **t₂** — time travelling **against** the water flow (upstream direction)
+
+When water flows, the two times differ. The flow rate is derived from that difference:
+
+$$\Delta t = t_1 - t_2 \qquad Q = K \cdot \frac{L \cdot \Delta t}{t_1 \cdot t_2} \cdot A$$
+
+where `L` = transducer spacing along the acoustic path, `A` = pipe cross-section area,
+and `K` = factory calibration coefficient.
+
+### 4.2 Procedure (4 steps)
+
+| Step | Action | Detail |
+|---|---|---|
+| **1. Power up** | Enable TDC-GP22 + transducer supply | Wait ~1 ms to stabilise |
+| **2. Configure TDC** | Mode 2, 4 MHz ref clock, fire-pulse count, expected hits | Sent once via SPI |
+| **3. Fire & capture** | Trigger FIRE_IN, read ToF result via SPI | Repeat **N = 4–8** times per direction, average, reject outliers |
+| **4. Compute & store** | Calculate Δt, Q, accumulate volume, check alarms | Apply temperature compensation |
+
+### 4.3 Flowchart
+
 ```mermaid
 flowchart TD
-    A([Start Measurement]) --> B["Power ON TDC + Transducers"]
-    B --> C["Measure ToF Upstream → t₁"]
-    C --> D["Measure ToF Downstream → t₂"]
-    D --> E{t₁, t₂<br/>valid?}
-    E -- No --> F{Retry<br/>< 3?}
-    F -- Yes --> C
-    F -- No --> FAIL["⚠️ Sensor Fault<br/>Status D6=1"]
+    A([Start Measurement]) --> S1["Step 1 — Power ON<br/>TDC-GP22 + 1 MHz transducers"]
+    S1 --> S2["Step 2 — Configure TDC-GP22<br/>Mode 2 • 4 MHz ref clock"]
 
-    E -- Yes --> G["Repeat N=4-8 times<br/>Remove outliers, average"]
-    G --> H["Compute Δt = t₁ - t₂<br/>Q = K · L · Δt / (t₁ · t₂) · A"]
-    H --> I["Temperature compensation<br/>(NTC via ADC)"]
-    I --> J{Δt < 0?}
-    J -- Yes --> K["Reverse Volume += Q·dt<br/>Set Reverse Flag"]
-    J -- No --> L["Forward Volume += Q·dt"]
-    K --> M["Update RAM:<br/>flow, vol, temp, battery"]
-    L --> M
-    M --> N["Check Alarms:<br/>Leak • Burst • Low Battery"]
-    N --> O["Power OFF TDC"]
-    FAIL --> O
-    O --> END([End])
+    S2 --> S3A["Step 3a — Fire downstream burst<br/>Read t₁ via SPI"]
+    S3A --> S3B["Step 3b — Fire upstream burst<br/>Read t₂ via SPI"]
+    S3B --> V{t₁, t₂<br/>valid?}
+    V -- No --> R{Retry < 3?}
+    R -- Yes --> S3A
+    R -- No --> FAIL["⚠️ Sensor Fault<br/>Set Status D6 = 1"]
+
+    V -- Yes --> NS{N samples<br/>collected?}
+    NS -- No --> S3A
+    NS -- Yes --> S4A["Step 4a — Average ToF<br/>Reject outliers"]
+    S4A --> S4B["Step 4b — Compute<br/>Δt = t₁ - t₂<br/>Q = K · L · Δt / (t₁·t₂) · A"]
+    S4B --> S4C["Step 4c — Temperature compensation<br/>(NTC via ADC)"]
+    S4C --> DIR{Flow direction?}
+    DIR -- "Δt ≥ 0 — Forward" --> FWD["Forward volume += Q·dt"]
+    DIR -- "Δt < 0 — Reverse" --> REV["Reverse volume += Q·dt<br/>Set Reverse flag"]
+    FWD --> UPD
+    REV --> UPD["Update RAM:<br/>flow, volume, temp, battery"]
+    UPD --> ALM["Check alarms:<br/>Leak • Burst • Low battery"]
+    ALM --> OFF["Power OFF TDC-GP22"]
+    FAIL --> OFF
+    OFF --> END([End])
 
     style A fill:#4CAF50,color:#fff
     style END fill:#4CAF50,color:#fff
@@ -201,9 +259,15 @@ flowchart TD
 
 ## 6. Button Handling — Screen Switching
 
+The user input is a **capacitive spring touch button**. The spring acts as the touch electrode
+connected to a STM32WL5C TSC (Touch Sensing Controller) channel. The TSC periodically
+samples capacitance; a press is detected when the measured value crosses the calibrated
+threshold for at least 20 ms (software debounce). No mechanical contact is required, which
+improves IP68 reliability.
+
 ```mermaid
 flowchart TD
-    A([Button IRQ]) --> B["Debounce 20ms"]
+    A([TSC Threshold IRQ]) --> B["Software debounce 20ms<br/>Confirm stable touch"]
     B --> C["screen_index = (screen_index+1) % 7"]
     C --> D{Screen}
     D -- 0 --> S0["Forward Volume (m³)"]
@@ -317,7 +381,7 @@ flowchart LR
 | **IR Config** | IR RX | Per session | ~10 mA | AT command R/W |
 | **Join** | Boot / Rejoin | 3–10 s | ~120 mA (TX) | OTAA |
 
-**Wakeup sources from STOP2:** RTC Alarm A (measure), RTC Alarm B (report), EXTI button, LPUART RX (IR).
+**Wakeup sources from STOP2:** RTC Alarm A (measure), RTC Alarm B (report), TSC touch event (capacitive button), LPUART RX (IR).
 
 ---
 
