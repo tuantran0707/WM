@@ -1,10 +1,10 @@
 # Firmware Architecture — AVC Ultrasonic Water Meter
 
-**MCU:** STM32WL5C  •  **Radio:** LoRaWAN AS923-2 (Việt Nam)  •  **Pipe:** DN15
+**MCU:** STM32WL5C  •  **Radio:** LoRaWAN AS923-2 (Vietnam)  •  **Pipe:** DN15
 
 ---
 
-## 1. Sơ đồ khối hệ thống
+## 1. System Block Diagram
 
 ```mermaid
 flowchart LR
@@ -52,7 +52,7 @@ flowchart LR
 
 ---
 
-## 2. Kiến trúc Firmware (HAL + Application)
+## 2. Firmware Architecture (HAL + Application)
 
 ```mermaid
 flowchart TB
@@ -79,20 +79,28 @@ flowchart TB
     end
 
     H_TDC --> FLOW
-    H_ADC --> FLOW & ALARM
+    H_ADC --> FLOW
+    H_ADC --> ALARM
     H_LCD --> DISP
     H_GPIO --> DISP
     H_IR --> IRCMD
     H_RF --> LWAN
-    H_RTC --> PWR & LOG
-    H_NVM --> CFG & LOG
+    H_RTC --> PWR
+    H_RTC --> LOG
+    H_NVM --> CFG
+    H_NVM --> LOG
 
-    FLOW --> LOG & DISP & ALARM
-    CFG --> FLOW & LWAN
+    FLOW --> LOG
+    FLOW --> DISP
+    FLOW --> ALARM
+    CFG --> FLOW
+    CFG --> LWAN
     LOG --> LWAN
-    ALARM --> LWAN & DISP
+    ALARM --> LWAN
+    ALARM --> DISP
     IRCMD --> CFG
-    PWR --> FLOW & LWAN
+    PWR --> FLOW
+    PWR --> LWAN
 
     style APP fill:#e3f2fd,stroke:#1565C0
     style HAL fill:#f0f4c3,stroke:#827717
@@ -100,26 +108,28 @@ flowchart TB
 
 ---
 
-## 3. Lưu đồ giải thuật chính
+## 3. Main Firmware Flowchart
 
 ```mermaid
 flowchart TD
-    START([Power On / Reset]) --> INIT["Init HW<br/>Clock • GPIO • SPI • LPUART • ADC • RTC"]
-    INIT --> CFG["Load Config từ Flash<br/>(DevEUI, AppKey, Interval, Cal)"]
-    CFG --> VALID{Config<br/>hợp lệ?}
-    VALID -- Không --> DEF["Nạp Default Config"] --> JOIN
-    VALID -- Có --> JOIN
+    START([Power On / Reset]) --> INIT["HW Init<br/>Clock • GPIO • SPI • LPUART • ADC • RTC"]
+    INIT --> CFG["Load Config from Flash<br/>(DevEUI, AppKey, Interval, Cal)"]
+    CFG --> VALID{Config<br/>valid?}
+    VALID -- No --> DEF["Load Default Config"]
+    DEF --> JOIN
+    VALID -- Yes --> JOIN
 
     JOIN["OTAA Join Request<br/>AS923-2"] --> JOK{Join<br/>Accept?}
-    JOK -- Không --> BACK["Exponential Backoff"] --> JOIN
-    JOK -- Có --> IDLE
+    JOK -- No --> BACK["Exponential Backoff"]
+    BACK --> JOIN
+    JOK -- Yes --> IDLE
 
     IDLE(["💤 STOP2 Sleep<br/>~2µA"]) --> WK{Wakeup Source?}
 
-    WK -- "RTC 15s" --> MEAS[/"Đo Ultrasonic<br/>(Mục 4)"/]
-    WK -- "RTC 24h" --> RPT[/"Báo cáo LoRaWAN<br/>(Mục 5)"/]
-    WK -- "Button" --> SCR[/"Chuyển màn hình<br/>(Mục 6)"/]
-    WK -- "IR RX" --> IRC[/"Xử lý AT Command<br/>(Mục 7)"/]
+    WK -- "RTC 15s" --> MEAS[/"Ultrasonic Measurement<br/>(Section 4)"/]
+    WK -- "RTC 24h" --> RPT[/"LoRaWAN Report<br/>(Section 5)"/]
+    WK -- "Button" --> SCR[/"Screen Switch<br/>(Section 6)"/]
+    WK -- "IR RX" --> IRC[/"AT Command Handler<br/>(Section 7)"/]
 
     MEAS --> IDLE
     RPT --> IDLE
@@ -132,30 +142,30 @@ flowchart TD
 
 ---
 
-## 4. Đo lường Ultrasonic (Time-of-Flight)
+## 4. Ultrasonic Measurement (Time-of-Flight)
 
 ```mermaid
 flowchart TD
-    A([Bắt đầu đo]) --> B["Power ON TDC + Transducers"]
-    B --> C["Đo ToF Upstream → t₁"]
-    C --> D["Đo ToF Downstream → t₂"]
-    D --> E{t₁, t₂<br/>hợp lệ?}
-    E -- Không --> F{Retry<br/>< 3?}
-    F -- Có --> C
-    F -- Không --> FAIL["⚠️ Sensor Fault<br/>Status D6=1"]
+    A([Start Measurement]) --> B["Power ON TDC + Transducers"]
+    B --> C["Measure ToF Upstream → t₁"]
+    C --> D["Measure ToF Downstream → t₂"]
+    D --> E{t₁, t₂<br/>valid?}
+    E -- No --> F{Retry<br/>< 3?}
+    F -- Yes --> C
+    F -- No --> FAIL["⚠️ Sensor Fault<br/>Status D6=1"]
 
-    E -- Có --> G["Lặp N=4-8 lần<br/>Loại outlier, lấy trung bình"]
-    G --> H["Tính Δt = t₁ - t₂<br/>Q = K · L · Δt / (t₁ · t₂) · A"]
-    H --> I["Bù nhiệt độ<br/>(NTC qua ADC)"]
+    E -- Yes --> G["Repeat N=4-8 times<br/>Remove outliers, average"]
+    G --> H["Compute Δt = t₁ - t₂<br/>Q = K · L · Δt / (t₁ · t₂) · A"]
+    H --> I["Temperature compensation<br/>(NTC via ADC)"]
     I --> J{Δt < 0?}
-    J -- Có --> K["Reverse Volume += Q·dt<br/>Set Reverse Flag"]
-    J -- Không --> L["Forward Volume += Q·dt"]
-    K --> M["Cập nhật RAM:<br/>flow, vol, temp, battery"]
+    J -- Yes --> K["Reverse Volume += Q·dt<br/>Set Reverse Flag"]
+    J -- No --> L["Forward Volume += Q·dt"]
+    K --> M["Update RAM:<br/>flow, vol, temp, battery"]
     L --> M
-    M --> N["Kiểm tra Alarm:<br/>Leak • Burst • Low Bat"]
+    M --> N["Check Alarms:<br/>Leak • Burst • Low Battery"]
     N --> O["Power OFF TDC"]
     FAIL --> O
-    O --> END([Kết thúc])
+    O --> END([End])
 
     style A fill:#4CAF50,color:#fff
     style END fill:#4CAF50,color:#fff
@@ -164,24 +174,24 @@ flowchart TD
 
 ---
 
-## 5. Báo cáo LoRaWAN
+## 5. LoRaWAN Report
 
 ```mermaid
 flowchart TD
-    A([Bắt đầu Report]) --> B["Freeze daily record<br/>Lưu History Buffer"]
-    B --> C["Đóng gói Payload<br/>(IOTST1501.2 — Mục 8)"]
-    C --> D["Uplink LoRaWAN<br/>Port 2, Confirmed"]
+    A([Start Report]) --> B["Freeze daily record<br/>Save to history buffer"]
+    B --> C["Build payload<br/>(IOTST1501.2 — Section 8)"]
+    C --> D["LoRaWAN Uplink<br/>Port 2, Confirmed"]
     D --> E{ACK?}
-    E -- Có --> F["success++"]
-    E -- Không --> G{Retry < 3?}
-    G -- Có --> D
-    G -- Không --> H["fail++ • Log error"]
-    F --> I{Có Downlink?}
+    E -- Yes --> F["success++"]
+    E -- No --> G{Retry < 3?}
+    G -- Yes --> D
+    G -- No --> H["fail++ • Log error"]
+    F --> I{Downlink<br/>received?}
     H --> I
-    I -- Có --> J["Parse Downlink:<br/>• Update Interval<br/>• Update Params<br/>• Remote Reset"]
-    J --> K["Apply + Save Flash"]
-    I -- Không --> K
-    K --> END([Kết thúc])
+    I -- Yes --> J["Parse Downlink:<br/>• Update Interval<br/>• Update Params<br/>• Remote Reset"]
+    J --> K["Apply + Save to Flash"]
+    I -- No --> K
+    K --> END([End])
 
     style A fill:#4CAF50,color:#fff
     style END fill:#4CAF50,color:#fff
@@ -189,7 +199,7 @@ flowchart TD
 
 ---
 
-## 6. Xử lý nút ấn — Chuyển màn hình
+## 6. Button Handling — Screen Switching
 
 ```mermaid
 flowchart TD
@@ -203,11 +213,17 @@ flowchart TD
     D -- 4 --> S4["Battery Voltage (V)"]
     D -- 5 --> S5["LoRaWAN: RSSI / Join"]
     D -- 6 --> S6["DevEUI / FW Version"]
-    S0 & S1 & S2 & S3 & S4 & S5 & S6 --> E["Refresh LCD<br/>Start auto-off 30s"]
+    S0 --> E
+    S1 --> E
+    S2 --> E
+    S3 --> E
+    S4 --> E
+    S5 --> E
+    S6 --> E["Refresh LCD<br/>Start auto-off timer (30s)"]
     E --> F{Timeout 30s?}
-    F -- Không --> F
-    F -- Có --> G["Về màn hình mặc định<br/>Tắt backlight"]
-    G --> END([Kết thúc])
+    F -- No --> F
+    F -- Yes --> G["Return to default screen<br/>Disable backlight"]
+    G --> END([End])
 
     style A fill:#4CAF50,color:#fff
     style END fill:#4CAF50,color:#fff
@@ -215,21 +231,25 @@ flowchart TD
 
 ---
 
-## 7. Xử lý IR AT Command
+## 7. IR AT Command Handler
 
 ```mermaid
 flowchart TD
-    A([LPUART RX IRQ]) --> B["Buffer ký tự đến CR/LF"]
+    A([LPUART RX IRQ]) --> B["Buffer chars until CR/LF"]
     B --> C{Parse AT}
-    C -- "AT+xxx?" --> R1["Đọc Config / Status"]
-    C -- "AT+xxx=val" --> R2["Validate → Save Flash"]
-    C -- "AT+DIAG" --> R3["Self-diagnostic<br/>TDC • Sensor • RF • Bat"]
+    C -- "AT+xxx?" --> R1["Read Config / Status"]
+    C -- "AT+xxx=val" --> R2["Validate → Save to Flash"]
+    C -- "AT+DIAG" --> R3["Self-diagnostic<br/>TDC • Sensor • RF • Battery"]
     C -- "AT+RESET" --> R4["NVIC_SystemReset()"]
-    C -- "AT+FACTORY" --> R5["Restore Default"]
+    C -- "AT+FACTORY" --> R5["Restore Defaults"]
     C -- "Unknown" --> R6["Return ERROR"]
-    R1 & R2 & R3 & R5 & R6 --> T["Gửi Response qua IR TX"]
+    R1 --> T
+    R2 --> T
+    R3 --> T
+    R5 --> T
+    R6 --> T["Send response via IR TX"]
     R4 --> RST([Reset])
-    T --> END([Kết thúc])
+    T --> END([End])
 
     style A fill:#4CAF50,color:#fff
     style END fill:#4CAF50,color:#fff
@@ -237,44 +257,82 @@ flowchart TD
 
 ---
 
-## 8. Cấu trúc Uplink Payload (IOTST1501.2)
+## 8. Uplink Payload Structure (IOTST1501.2)
+
+### 8.1 Frame layout
+
+| Offset | Field | Size | Description |
+|---:|---|---:|---|
+| 0 | Start | 1 B | `0x68` |
+| 1 | Type | 1 B | Instrument type (`0x10`) |
+| 2 | Address | 7 B | BCD little-endian |
+| 9 | Control | 1 B | `0x81` |
+| 10 | Length | 1 B | Data field length |
+| 11 | Data Header | 11 B | DI0, DI1, SER, timestamp, protocol no. |
+| 22 | Forward Volume | 5 B | Unit + 4 B BCD value |
+| 27 | Reverse Volume | 5 B | Unit + 4 B BCD value |
+| 32 | Instant Flow | 5 B | Unit + 4 B BCD value |
+| 37 | Water Temperature | 4 B | Signed, 0.01 °C |
+| 41 | Working Time | 2 B | Hours |
+| 43 | Battery Voltage | 2 B | Unit 0.01 V |
+| 45 | Status Word 1 + 2 | 4 B | Faults / mode bits |
+| 49 | Daily History | N · 14 B | Frozen records |
+| ... | Comm Stats | 14 B | Intervals, success/fail counters, RSSI |
+| ... | Identifiers | 22 B | ICCID, IMEI, protocol version |
+| -2 | Checksum (CS) | 1 B | Sum of bytes mod 256 |
+| -1 | End | 1 B | `0x16` |
+
+### 8.2 Sequence diagram (frame composition)
 
 ```mermaid
 flowchart LR
-    F1["68H<br/>Start"] --> F2["Type<br/>10H"] --> F3["Addr<br/>7B BCD"] --> F4["Ctrl<br/>81H"] --> F5["Len"] --> F6["Header<br/>DI0/DI1/SER<br/>+Timestamp"]
-    F6 --> F7["Forward<br/>Vol 5B"] --> F8["Reverse<br/>Vol 5B"] --> F9["Instant<br/>Flow 5B"] --> F10["Temp<br/>4B"] --> F11["WorkTime<br/>2B"] --> F12["Vbat<br/>2B"]
-    F12 --> F13["Status<br/>4B"] --> F14["Daily<br/>History"] --> F15["Comm<br/>Stats"] --> F16["CS"] --> F17["16H<br/>End"]
+    F1["0x68<br/>Start"] --> F2["Type<br/>0x10"] --> F3["Addr<br/>7 B"] --> F4["Ctrl<br/>0x81"] --> F5["Len"]
+    F5 --> F6["Data Header<br/>11 B"] --> F7["Fwd Vol<br/>5 B"] --> F8["Rev Vol<br/>5 B"] --> F9["Flow<br/>5 B"]
+    F9 --> F10["Temp<br/>4 B"] --> F11["WorkTime<br/>2 B"] --> F12["Vbat<br/>2 B"] --> F13["Status<br/>4 B"]
+    F13 --> F14["Daily<br/>History"] --> F15["Comm<br/>Stats"] --> F16["IDs<br/>ICCID/IMEI"] --> F17["CS"] --> F18["0x16<br/>End"]
 ```
 
+### 8.3 Status Word 1 (bit definitions)
+
+| Bit | Name | Description |
+|---:|---|---|
+| D7 | Direction | `0` Forward / `1` Reverse |
+| D6 | Flow sensor / air-in-pipe | `0` OK / `1` Fault |
+| D5 | Temperature sensor | `0` OK / `1` Fault |
+| D4 | Pipe leak | `0` OK / `1` Detected |
+| D3 | Pipe burst | `0` OK / `1` Detected |
+| D2 | Main power | `0` Normal / `1` Under-voltage |
+| D1–D0 | Reserved | — |
+
 ---
 
-## 9. Chế độ hoạt động & năng lượng
+## 9. Operating Modes & Power Profile
 
-| Chế độ | Trigger | Thời gian | Dòng | Mô tả |
-|---|---|---|---|---|
-| **STOP2 Sleep** | Mặc định | ~99.9% | ~2 µA | RAM giữ, RTC chạy |
-| **Measure** | RTC 15 s | ~50 ms | ~15 mA | Đo ToF + tính flow |
-| **Report** | RTC 24 h | 2–5 s | ~120 mA (TX) | Uplink LoRaWAN |
-| **Display** | Button | 30 s | ~5 mA | LCD bật |
-| **IR Config** | IR RX | Theo session | ~10 mA | AT command |
+| Mode | Trigger | Duration | Current | Notes |
+|---|---|---|---:|---|
+| **STOP2 Sleep** | Default | ~99.9% | ~2 µA | RAM retained, RTC running |
+| **Measure** | RTC 15 s | ~50 ms | ~15 mA | ToF + flow calc |
+| **Report** | RTC 24 h | 2–5 s | ~120 mA (TX) | LoRaWAN uplink |
+| **Display** | Button | 30 s | ~5 mA | LCD active |
+| **IR Config** | IR RX | Per session | ~10 mA | AT command R/W |
 | **Join** | Boot / Rejoin | 3–10 s | ~120 mA (TX) | OTAA |
 
-**Wakeup sources từ STOP2:** RTC Alarm A (measure), RTC Alarm B (report), EXTI button, LPUART RX (IR).
+**Wakeup sources from STOP2:** RTC Alarm A (measure), RTC Alarm B (report), EXTI button, LPUART RX (IR).
 
 ---
 
-## 10. Bảng AT Commands (IR Interface)
+## 10. AT Command Set (IR Interface)
 
-| Command | Mô tả |
+| Command | Description |
 |---|---|
-| `AT` | Test connection → `OK` |
-| `AT+DEVEUI?` / `AT+DEVEUI=<hex>` | Đọc / Ghi DevEUI |
-| `AT+APPEUI?` / `AT+APPEUI=<hex>` | Đọc / Ghi JoinEUI |
-| `AT+APPKEY=<hex>` | Ghi AppKey (32 hex) |
-| `AT+REGION?` / `AT+REGION=AS923_2` | Đọc / Ghi Region |
-| `AT+INTERVAL?` / `AT+INTERVAL=<min>` | Đọc / Ghi Report Interval |
-| `AT+FLOWCAL?` / `AT+FLOWCAL=<K>,<off>` | Đọc / Ghi hệ số hiệu chuẩn |
-| `AT+STATUS?` | Vol • Flow • Temp • Bat • RSSI |
+| `AT` | Connection test → `OK` |
+| `AT+DEVEUI?` / `AT+DEVEUI=<hex>` | Read / Write DevEUI |
+| `AT+APPEUI?` / `AT+APPEUI=<hex>` | Read / Write JoinEUI |
+| `AT+APPKEY=<hex>` | Write AppKey (32 hex chars) |
+| `AT+REGION?` / `AT+REGION=AS923_2` | Read / Write region |
+| `AT+INTERVAL?` / `AT+INTERVAL=<min>` | Read / Write report interval |
+| `AT+FLOWCAL?` / `AT+FLOWCAL=<K>,<off>` | Read / Write calibration |
+| `AT+STATUS?` | Volume • Flow • Temp • Battery • RSSI |
 | `AT+DIAG` | Self-diagnostic |
 | `AT+VER?` | Firmware version |
 | `AT+RESET` | Software reset |
