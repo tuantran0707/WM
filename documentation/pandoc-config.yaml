@@ -1,0 +1,59 @@
+---
+# Pandoc Reference Document Configuration
+# This document defines the styling for generated .docx files
+
+# Document metadata
+title: "EOL Factory Documentation"
+author: "NubeIO"
+date: "2025"
+company: "NubeIO"
+
+# Font settings
+mainfont: Roboto
+monofont: Roboto Mono
+fontsize: 11pt
+
+# Color scheme
+# Primary color: #329a9b (Teal/Turquoise)
+# All headings should use this color
+linkcolor: "#329a9b"
+urlcolor: "#329a9b"
+toccolor: "#329a9b"
+
+# Title page
+titlepage: true
+titlepage-color: "FFFFFF"
+titlepage-text-color: "000000"
+titlepage-rule-color: "329a9b"
+titlepage-rule-height: 2
+
+# Heading styles will use the primary color
+# Level 1, 2, 3, 4 headings: #329a9b (teal)
+# This is applied through the reference document
+
+# Page settings
+geometry:
+  - margin=1in
+  - letterpaper
+
+# Table of contents
+toc: true
+toc-depth: 3
+toc-own-page: true
+
+# Page breaks
+page-break-after-toc: true
+
+# Code block settings
+highlight-style: tango
+
+# Pandoc options
+standalone: true
+number-sections: false
+
+# Header and footer
+header-includes: |
+  <style>
+    h1, h2, h3, h4, h5, h6 { color: #329a9b; }
+  </style>
+---
