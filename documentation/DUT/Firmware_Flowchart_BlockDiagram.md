@@ -111,15 +111,20 @@ flowchart TB
 ## 3. Main Firmware Flowchart
 
 The firmware is **event-driven** around a single low-power sleep state (STOP2).
-All work is triggered by one of four wakeup sources; after each task the MCU
-returns to sleep. This minimises active time and maximises battery life.
+The device spends ~99.9% of its time asleep. It wakes up only when one of these
+events occurs:
+
+- **RTC report timer** (e.g. every 24 h) → run **Join + Uplink** cycle, then sleep again.
+- **RTC measure timer** (every 15 s) → run a short ultrasonic measurement, then sleep.
+- **TSC capacitive touch** → user pressed the button → switch LCD screen, then sleep.
+- **IR RX** → AT command session, then sleep.
 
 **Three phases of execution:**
 
 | Phase | Runs | Purpose |
 |---|---|---|
 | **A. Boot** | Once after reset | Init hardware, load config, prepare peripherals |
-| **B. Network Join** | Once after boot (and on rejoin) | OTAA Join to LoRaWAN AS923-2 |
+| **B. Periodic Join & Report** | Every report cycle (RTC scheduled) | Join Request → Join Accept → Uplink; up to **2 retries**, then sleep |
 | **C. Run Loop** | Forever | Sleep → wake → handle event → sleep |
 
 ```mermaid
@@ -137,25 +142,29 @@ flowchart TD
 
     A5 --> B1
 
-    subgraph PHASE_B["Phase B — Network Join"]
-        B1["Init LoRaWAN stack<br/>AS923-2 band"]
+    subgraph PHASE_B["Phase B — Periodic Join & Report"]
+        B1["Wake on RTC schedule<br/>(report interval)"]
         B1 --> B2["Send OTAA Join Request"]
-        B2 --> B3{Join Accept?}
-        B3 -- No --> B4["Backoff (exponential)"]
-        B4 --> B2
-        B3 -- Yes --> B5["✅ Save session keys"]
+        B2 --> B3{Join Accept<br/>received?}
+        B3 -- No --> B4{Retry < 2?}
+        B4 -- Yes --> B5["Short backoff"]
+        B5 --> B2
+        B4 -- No --> B6["❌ Give up this cycle<br/>Log failure"]
+        B3 -- Yes --> B7["✅ Save session keys<br/>Send uplink data"]
+        B6 --> IDLE
+        B7 --> IDLE
     end
 
-    B5 --> IDLE
+    IDLE([💤 STOP2 Sleep ~2µA])
 
     subgraph PHASE_C["Phase C — Run Loop"]
-        IDLE(["💤 STOP2 Sleep ~2µA"]) --> WK{Wakeup Source}
+        IDLE --> WK{Wakeup Source}
+        WK -- "RTC Report<br/>(scheduled)" --> EV0["Re-enter Phase B<br/>→ Join + Uplink"]
         WK -- "RTC 15 s" --> EV1["Ultrasonic Measure<br/>→ Section 4"]
-        WK -- "RTC 24 h" --> EV2["LoRaWAN Report<br/>→ Section 5"]
         WK -- "TSC Touch" --> EV3["Screen Switch<br/>→ Section 6"]
         WK -- "IR RX" --> EV4["AT Command<br/>→ Section 7"]
+        EV0 --> IDLE
         EV1 --> IDLE
-        EV2 --> IDLE
         EV3 --> IDLE
         EV4 --> IDLE
     end
